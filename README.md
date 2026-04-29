@@ -17,7 +17,7 @@ A real-time digital audio processing system that receives Bluetooth audio (A2DP)
 | Power | 24V / 150W PSU | Powers amplifier |
 
 ## Pin Connections
-![Uploading e5873461ac603b081e2ea642732dc88e.jpg…]()
+<img width="4284" height="5712" alt="Connection" src="https://github.com/user-attachments/assets/e4d4ac63-0d18-4e3b-b83c-1e9997cea7a4" />
 
 ### I2S (Audio Data)
 
