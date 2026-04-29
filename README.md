@@ -4,19 +4,6 @@ A real-time digital audio processing system that receives Bluetooth audio (A2DP)
 
 ## System Architecture
 
-```
-                     Bluetooth A2DP
-Phone ─────────────────────────────→ ESP32
-                                       ↕ UART (GPIO2/4, 38400 baud)
-PC (Python GUI) ←──── USB/COM5 ────→ ESP32 ←──── I2S ────→ STM32F407
-  • 8-band EQ control                                         ↓
-  • FFT spectrum display                                   ADAU1761 (DAC)
-  • EQ presets                                                 ↓
-                                                           TPA3116D2 (Amp)
-                                                               ↓
-                                                         Pioneer Speakers
-```
-
 ## Hardware
 
 | Component | Model | Role |
