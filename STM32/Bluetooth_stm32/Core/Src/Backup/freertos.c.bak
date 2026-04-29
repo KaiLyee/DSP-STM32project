@@ -1,0 +1,384 @@
+/* USER CODE BEGIN Header */
+/**
+  ******************************************************************************
+  * File Name          : freertos.c
+  * Description        : Code for freertos applications
+  ******************************************************************************
+  * @attention
+  *
+  * Copyright (c) 2026 STMicroelectronics.
+  * All rights reserved.
+  *
+  * This software is licensed under terms that can be found in the LICENSE file
+  * in the root directory of this software component.
+  * If no LICENSE file comes with this software, it is provided AS-IS.
+  *
+  ******************************************************************************
+  */
+/* USER CODE END Header */
+
+/* Includes ------------------------------------------------------------------*/
+#include "FreeRTOS.h"
+#include "task.h"
+#include "main.h"
+#include "cmsis_os.h"
+
+/* Private includes ----------------------------------------------------------*/
+/* USER CODE BEGIN Includes */
+#include "queue.h"
+#include "i2s.h"
+#include "usart.h"
+#include <math.h>
+#include <string.h>
+#include <stdio.h>
+#include <stdlib.h>
+/* USER CODE END Includes */
+
+/* Private typedef -----------------------------------------------------------*/
+/* USER CODE BEGIN PTD */
+typedef struct {
+    float lp_b0_s1, lp_b1_s1, lp_b2_s1, lp_a1_s1, lp_a2_s1;
+    float lp_b0_s2, lp_b1_s2, lp_b2_s2, lp_a1_s2, lp_a2_s2;
+    float hp_b0_s1, hp_b1_s1, hp_b2_s1, hp_a1_s1, hp_a2_s1;
+    float hp_b0_s2, hp_b1_s2, hp_b2_s2, hp_a1_s2, hp_a2_s2;
+} FilterCoeffs_t;
+/* USER CODE END PTD */
+
+/* Private define ------------------------------------------------------------*/
+/* USER CODE BEGIN PD */
+#define FS 44100.0f
+#define PI 3.14159265358979323846f
+/* USER CODE END PD */
+
+/* Private macro -------------------------------------------------------------*/
+/* USER CODE BEGIN PM */
+
+/* USER CODE END PM */
+
+/* Private variables ---------------------------------------------------------*/
+/* USER CODE BEGIN Variables */
+QueueHandle_t xCoeffQueue = NULL;
+
+/* Crossover presets: 1kHz, 2kHz, 4kHz */
+static const float crossover_freqs[] = { 4000.0f, 8000.0f, 12000.0f };
+static uint8_t current_preset = 1;  /* start at 8kHz */
+
+/* LED pins: orange=PD13 for 1kHz, red=PD14 for 2kHz, blue=PD15 for 4kHz */
+static const uint16_t preset_leds[] = { GPIO_PIN_13, GPIO_PIN_14, GPIO_PIN_15 };
+/* USER CODE END Variables */
+/* Definitions for defaultTask */
+osThreadId_t defaultTaskHandle;
+const osThreadAttr_t defaultTask_attributes = {
+  .name = "defaultTask",
+  .stack_size = 128 * 4,
+  .priority = (osPriority_t) osPriorityNormal,
+};
+
+/* Private function prototypes -----------------------------------------------*/
+/* USER CODE BEGIN FunctionPrototypes */
+void ButtonTask(void *argument);
+void UartTask(void *argument);
+static void compute_crossover_coeffs(float fc, FilterCoeffs_t *c);
+/* USER CODE END FunctionPrototypes */
+
+void StartDefaultTask(void *argument);
+
+extern void MX_USB_HOST_Init(void);
+void MX_FREERTOS_Init(void); /* (MISRA C 2004 rule 8.1) */
+
+/**
+  * @brief  FreeRTOS initialization
+  * @param  None
+  * @retval None
+  */
+void MX_FREERTOS_Init(void) {
+  /* USER CODE BEGIN Init */
+
+  /* USER CODE END Init */
+
+  /* USER CODE BEGIN RTOS_MUTEX */
+  /* add mutexes, ... */
+  /* USER CODE END RTOS_MUTEX */
+
+  /* USER CODE BEGIN RTOS_SEMAPHORES */
+  /* USER CODE END RTOS_SEMAPHORES */
+
+  /* USER CODE BEGIN RTOS_TIMERS */
+  /* start timers, add new ones, ... */
+  /* USER CODE END RTOS_TIMERS */
+
+  /* USER CODE BEGIN RTOS_QUEUES */
+  xCoeffQueue = xQueueCreate(1, sizeof(FilterCoeffs_t));
+  /* USER CODE END RTOS_QUEUES */
+
+  /* Create the thread(s) */
+  /* creation of defaultTask */
+  defaultTaskHandle = osThreadNew(StartDefaultTask, NULL, &defaultTask_attributes);
+
+  /* USER CODE BEGIN RTOS_THREADS */
+  const osThreadAttr_t buttonTask_attributes = {
+    .name = "ButtonTask",
+    .stack_size = 512 * 4,
+    .priority = (osPriority_t) osPriorityLow,
+  };
+  osThreadNew(ButtonTask, NULL, &buttonTask_attributes);
+
+  const osThreadAttr_t uartTask_attributes = {
+    .name = "UartTask",
+    .stack_size = 512 * 4,
+    .priority = (osPriority_t) osPriorityLow,
+  };
+  osThreadNew(UartTask, NULL, &uartTask_attributes);
+  /* USER CODE END RTOS_THREADS */
+
+  /* USER CODE BEGIN RTOS_EVENTS */
+  /* add events, ... */
+  /* USER CODE END RTOS_EVENTS */
+
+}
+
+/* USER CODE BEGIN Header_StartDefaultTask */
+/**
+  * @brief  Function implementing the defaultTask thread.
+  * @param  argument: Not used
+  * @retval None
+  */
+/* USER CODE END Header_StartDefaultTask */
+void StartDefaultTask(void *argument)
+{
+  /* init code for USB_HOST */
+  MX_USB_HOST_Init();
+  /* USER CODE BEGIN StartDefaultTask */
+
+  /*
+   * [FIX 4] DMA is now started HERE, after the scheduler is fully running.
+   *
+   * Previously it was started in main() before osKernelStart().
+   * That caused DMA interrupts to fire while the scheduler wasn't
+   * running yet, making xQueueReceiveFromISR() behave unpredictably.
+   *
+   * [FIX 5] DMA Size: 4 -> 16
+   *
+   * HAL_I2SEx_TransmitReceive_DMA(handle, txBuf, rxBuf, Size)
+   * In I2S 16-bit extended mode, Size = number of uint16_t halfwords
+   * to transfer in TOTAL (not frames).
+   *
+   * Our buffer layout: 4 stereo frames x 4 halfwords/frame = 16 halfwords
+   *   Frame = [L_sample] [R_sample] [0_pad] [0_pad]
+   *
+   * With Size=16:
+   *   HalfCplt fires after 8 halfwords (frames 0-1) -> process rxBuf[0..7]
+   *   FullCplt fires after 16 halfwords (frames 2-3) -> process rxBuf[8..15]
+   *
+   * Old code had Size=4, meaning DMA only moved 4 halfwords (1 frame).
+   * The callbacks then read rxBuf[0..7] and rxBuf[8..15] which were
+   * mostly uninitialized zeros -> silence or noise.
+   */
+  extern int16_t rxBuf[];
+  extern int16_t txBuf[];
+
+  if (HAL_I2SEx_TransmitReceive_DMA(&hi2s2,
+        (uint16_t *)txBuf, (uint16_t *)rxBuf, 16) != HAL_OK)
+  {
+      HAL_GPIO_WritePin(GPIOD, GPIO_PIN_14, GPIO_PIN_SET);  /* red LED = error */
+      for (;;) { osDelay(1000); }
+  }
+  HAL_GPIO_WritePin(GPIOD, GPIO_PIN_12, GPIO_PIN_SET);  /* green LED = running */
+
+  /* Nothing left to do - audio processing happens in DMA ISR */
+  for(;;)
+  {
+    osDelay(1000);
+  }
+  /* USER CODE END StartDefaultTask */
+}
+
+/* Private application code --------------------------------------------------*/
+/* USER CODE BEGIN Application */
+
+static void compute_crossover_coeffs(float fc, FilterCoeffs_t *c)
+{
+    const float Q1 = 0.54119610014f;
+    const float Q2 = 1.30656296488f;
+
+    float w0 = 2.0f * PI * fc / FS;
+    float cosw0 = cosf(w0);
+    float sinw0 = sinf(w0);
+    float alpha, a0;
+
+    /* Section 1 (Q1) */
+    alpha = sinw0 / (2.0f * Q1);
+    a0 = 1.0f + alpha;
+
+    c->lp_b0_s1 = ((1.0f - cosw0) / 2.0f) / a0;
+    c->lp_b1_s1 = (1.0f - cosw0) / a0;
+    c->lp_b2_s1 = ((1.0f - cosw0) / 2.0f) / a0;
+    c->lp_a1_s1 = (-2.0f * cosw0) / a0;
+    c->lp_a2_s1 = (1.0f - alpha) / a0;
+
+    c->hp_b0_s1 = ((1.0f + cosw0) / 2.0f) / a0;
+    c->hp_b1_s1 = -(1.0f + cosw0) / a0;
+    c->hp_b2_s1 = ((1.0f + cosw0) / 2.0f) / a0;
+    c->hp_a1_s1 = (-2.0f * cosw0) / a0;
+    c->hp_a2_s1 = (1.0f - alpha) / a0;
+
+    /* Section 2 (Q2) */
+    alpha = sinw0 / (2.0f * Q2);
+    a0 = 1.0f + alpha;
+
+    c->lp_b0_s2 = ((1.0f - cosw0) / 2.0f) / a0;
+    c->lp_b1_s2 = (1.0f - cosw0) / a0;
+    c->lp_b2_s2 = ((1.0f - cosw0) / 2.0f) / a0;
+    c->lp_a1_s2 = (-2.0f * cosw0) / a0;
+    c->lp_a2_s2 = (1.0f - alpha) / a0;
+
+    c->hp_b0_s2 = ((1.0f + cosw0) / 2.0f) / a0;
+    c->hp_b1_s2 = -(1.0f + cosw0) / a0;
+    c->hp_b2_s2 = ((1.0f + cosw0) / 2.0f) / a0;
+    c->hp_a1_s2 = (-2.0f * cosw0) / a0;
+    c->hp_a2_s2 = (1.0f - alpha) / a0;
+}
+
+/*
+ * ButtonTask (low priority):
+ * Poll blue button (PA0) every 50ms.
+ * On press: cycle crossover 1kHz -> 2kHz -> 4kHz -> 1kHz
+ * Sends new coefficients via queue to DMA ISR in main.c
+ */
+void ButtonTask(void *argument)
+{
+    uint8_t lastState = GPIO_PIN_RESET;
+    FilterCoeffs_t coeffs;
+
+    /* Turn on initial LED (red = 2kHz) */
+    HAL_GPIO_WritePin(GPIOD, preset_leds[current_preset], GPIO_PIN_SET);
+
+    for (;;)
+    {
+        uint8_t currentState = HAL_GPIO_ReadPin(GPIOA, GPIO_PIN_0);
+
+        if (currentState == GPIO_PIN_SET && lastState == GPIO_PIN_RESET)
+        {
+            HAL_GPIO_WritePin(GPIOD, preset_leds[current_preset], GPIO_PIN_RESET);
+            current_preset = (current_preset + 1) % 3;
+            HAL_GPIO_WritePin(GPIOD, preset_leds[current_preset], GPIO_PIN_SET);
+
+            compute_crossover_coeffs(crossover_freqs[current_preset], &coeffs);
+
+            extern void apply_coefficients(const FilterCoeffs_t *c);
+            apply_coefficients(&coeffs);
+        }
+
+        lastState = currentState;
+        osDelay(50);
+    }
+}
+
+/*
+ * UartTask (low priority):
+ * - Receives commands from PC via USART2 (ST-LINK virtual COM port)
+ * - Parses commands and updates filter coefficients
+ * - Sends back acknowledgement
+ *
+ * Protocol:
+ *   PC sends:  "EQ:band,freq,gainDB,Q\n"   e.g. "EQ:1,2000,6.0,1.41\n"
+ *   PC sends:  "PING\n"                     connection test
+ *   STM32 replies: "OK:...\n" or "ERR:...\n"
+ */
+void UartTask(void *argument)
+{
+    extern UART_HandleTypeDef huart2;
+
+    char rxLine[64];
+    uint8_t rxByte;
+    uint8_t idx = 0;
+
+    /* Send startup message */
+    const char *hello = "STM32 DSP Ready\r\n";
+    HAL_UART_Transmit(&huart2, (uint8_t *)hello, strlen(hello), 100);
+
+    /* Wait for ESP32 to finish booting and flush any garbage */
+    osDelay(3000);
+    {
+        uint8_t dummy;
+        while (HAL_UART_Receive(&huart2, &dummy, 1, 10) == HAL_OK) {}
+    }
+
+    /* DEBUG: blue LED = UartTask ready */
+    HAL_GPIO_WritePin(GPIOD, GPIO_PIN_15, GPIO_PIN_SET);
+
+    for (;;)
+    {
+        /* Read one byte at a time with timeout */
+        if (HAL_UART_Receive(&huart2, &rxByte, 1, 50) == HAL_OK)
+        {
+            /* DEBUG: toggle orange LED on every received byte */
+            HAL_GPIO_TogglePin(GPIOD, GPIO_PIN_13);
+            if (rxByte == '\n' || rxByte == '\r')
+            {
+                if (idx > 0)
+                {
+                    rxLine[idx] = '\0';
+
+                    /* --- PING command: connection test --- */
+                    if (strcmp(rxLine, "PING") == 0)
+                    {
+                        const char *msg = "OK:PONG\r\n";
+                        HAL_UART_Transmit(&huart2, (uint8_t *)msg, strlen(msg), 100);
+                    }
+                    /* --- EQ command: update crossover frequency --- */
+                    else if (strncmp(rxLine, "EQ:", 3) == 0)
+                    {
+                        /* DEBUG: blue LED on = EQ command received */
+                        HAL_GPIO_WritePin(GPIOD, GPIO_PIN_15, GPIO_PIN_SET);
+
+                        int freq_int = atoi(rxLine + 3);
+                        if (freq_int >= 200 && freq_int <= 18000)
+                        {
+                            /* DEBUG: orange LED on = freq valid, calling apply */
+                            HAL_GPIO_WritePin(GPIOD, GPIO_PIN_13, GPIO_PIN_SET);
+
+                            float freq = (float)freq_int;
+                            FilterCoeffs_t coeffs;
+                            compute_crossover_coeffs(freq, &coeffs);
+
+                            extern void apply_coefficients(const FilterCoeffs_t *c);
+                            apply_coefficients(&coeffs);
+
+                            const char *msg = "OK:EQ\r\n";
+                            HAL_UART_Transmit(&huart2, (uint8_t *)msg, strlen(msg), 100);
+                        }
+                        else
+                        {
+                            /* DEBUG: red LED on = freq out of range */
+                            HAL_GPIO_WritePin(GPIOD, GPIO_PIN_14, GPIO_PIN_SET);
+
+                            const char *msg = "ERR:bad freq\r\n";
+                            HAL_UART_Transmit(&huart2, (uint8_t *)msg, strlen(msg), 100);
+                        }
+                    }
+                    /* --- Unknown command: silently ignore --- */
+
+                    idx = 0;
+                }
+            }
+            else
+            {
+                /* Only accept printable ASCII (space to ~), ignore garbage bytes */
+                if (rxByte >= 0x20 && rxByte <= 0x7E)
+                {
+                    if (idx < sizeof(rxLine) - 1)
+                        rxLine[idx++] = (char)rxByte;
+                }
+                else
+                {
+                    /* Non-printable byte: reset buffer (garbage from ESP32 boot) */
+                    idx = 0;
+                }
+            }
+        }
+    }
+}
+
+/* USER CODE END Application */
+

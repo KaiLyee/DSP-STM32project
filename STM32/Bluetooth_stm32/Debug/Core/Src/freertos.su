@@ -1,0 +1,6 @@
+../Core/Src/freertos.c:78:6:MX_FREERTOS_Init	120	static
+../Core/Src/freertos.c:102:6:StartDefaultTask	16	static
+../Core/Src/freertos.c:122:13:compute_peaking_eq	56	static
+../Core/Src/freertos.c:139:6:ButtonTask	16	static
+../Core/Src/freertos.c:144:6:UartTask	144	static
+../Core/Src/freertos.c:221:6:FFTTask	80	static

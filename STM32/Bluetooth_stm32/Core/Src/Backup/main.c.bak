@@ -1,0 +1,367 @@
+/* USER CODE BEGIN Header */
+/**
+  ******************************************************************************
+  * @file           : main.c
+  * @brief          : Main program body
+  ******************************************************************************
+  */
+/* USER CODE END Header */
+/* Includes ------------------------------------------------------------------*/
+#include "main.h"
+#include "cmsis_os.h"
+#include "dma.h"
+#include "i2c.h"
+#include "i2s.h"
+#include "spi.h"
+#include "usart.h"
+#include "usb_host.h"
+#include "gpio.h"
+
+/* Private includes ----------------------------------------------------------*/
+/* USER CODE BEGIN Includes */
+#include "queue.h"
+#include "arm_math.h"
+/* USER CODE END Includes */
+
+/* Private typedef -----------------------------------------------------------*/
+/* USER CODE BEGIN PTD */
+typedef struct {//filter parameters
+    float lp_b0_s1, lp_b1_s1, lp_b2_s1, lp_a1_s1, lp_a2_s1;
+    float lp_b0_s2, lp_b1_s2, lp_b2_s2, lp_a1_s2, lp_a2_s2;
+    float hp_b0_s1, hp_b1_s1, hp_b2_s1, hp_a1_s1, hp_a2_s1;
+    float hp_b0_s2, hp_b1_s2, hp_b2_s2, hp_a1_s2, hp_a2_s2;
+} FilterCoeffs_t;
+/* USER CODE END PTD */
+
+/* Private define ------------------------------------------------------------*/
+/* USER CODE BEGIN PD */
+#define AUDIO_BUF_SIZE 16
+/* USER CODE END PD */
+
+/* Private macro -------------------------------------------------------------*/
+/* USER CODE BEGIN PM */
+
+/* USER CODE END PM */
+
+/* Private variables ---------------------------------------------------------*/
+
+/* USER CODE BEGIN PV */
+
+/*
+ * [FIX 1] uint16_t -> int16_t
+ * I2S PCM audio is signed 16-bit (-32768 ~ +32767).
+ * Using unsigned buffers causes sign interpretation errors and distortion.
+ */
+int16_t rxBuf[AUDIO_BUF_SIZE];
+int16_t txBuf[AUDIO_BUF_SIZE];
+
+/* Active filter coefficients - initialized to 200Hz LP for testing */
+/* volatile: modified by UartTask/ButtonTask, read by DMA ISR */
+static volatile float act_lp_b0_s1 = +0.0001977740f;
+static volatile float act_lp_b1_s1 = +0.0003955481f;
+static volatile float act_lp_b2_s1 = +0.0001977740f;
+static volatile float act_lp_a1_s1 = -1.9479140291f;
+static volatile float act_lp_a2_s1 = +0.9487051253f;
+
+static volatile float act_lp_b0_s2 = +0.0002007907f;
+static volatile float act_lp_b1_s2 = +0.0004015814f;
+static volatile float act_lp_b2_s2 = +0.0002007907f;
+static volatile float act_lp_a1_s2 = -1.9776257216f;
+static volatile float act_lp_a2_s2 = +0.9784288845f;
+
+static volatile float act_hp_b0_s1 = +0.3853906464f;
+static volatile float act_hp_b1_s1 = -0.7707812929f;
+static volatile float act_hp_b2_s1 = +0.3853906464f;
+static volatile float act_hp_a1_s1 = -0.4542475802f;
+static volatile float act_hp_a2_s1 = +0.0873150056f;
+
+static volatile float act_hp_b0_s2 = +0.5260007776f;
+static volatile float act_hp_b1_s2 = -1.0520015552f;
+static volatile float act_hp_b2_s2 = +0.5260007776f;
+static volatile float act_hp_a1_s2 = -0.6199802268f;
+static volatile float act_hp_a2_s2 = +0.4840228835f;
+
+/* Filter states */
+static volatile float lp_s1_x1 = 0, lp_s1_x2 = 0, lp_s1_y1 = 0, lp_s1_y2 = 0;
+static volatile float lp_s2_x1 = 0, lp_s2_x2 = 0, lp_s2_y1 = 0, lp_s2_y2 = 0;
+static volatile float hp_s1_x1 = 0, hp_s1_x2 = 0, hp_s1_y1 = 0, hp_s1_y2 = 0;
+static volatile float hp_s2_x1 = 0, hp_s2_x2 = 0, hp_s2_y1 = 0, hp_s2_y2 = 0;
+
+/* Queue handle - created in freertos.c, used here to receive new coefficients */
+extern QueueHandle_t xCoeffQueue;
+/* USER CODE END PV */
+
+/* Private function prototypes -----------------------------------------------*/
+void SystemClock_Config(void);
+void MX_FREERTOS_Init(void);
+/* USER CODE BEGIN PFP */
+
+/* USER CODE END PFP */
+
+/* Private user code ---------------------------------------------------------*/
+/* USER CODE BEGIN 0 */
+
+/* USER CODE END 0 */
+
+/**
+  * @brief  The application entry point.
+  * @retval int
+  */
+int main(void)
+{
+
+  /* USER CODE BEGIN 1 */
+
+  /* USER CODE END 1 */
+
+  /* MCU Configuration--------------------------------------------------------*/
+
+  /* Reset of all peripherals, Initializes the Flash interface and the Systick. */
+  HAL_Init();
+
+  /* USER CODE BEGIN Init */
+
+  /* USER CODE END Init */
+
+  /* Configure the system clock */
+  SystemClock_Config();
+
+  /* USER CODE BEGIN SysInit */
+
+  /* USER CODE END SysInit */
+
+  /* Initialize all configured peripherals */
+  MX_GPIO_Init();
+  MX_DMA_Init();
+  MX_I2C1_Init();
+  MX_SPI1_Init();
+  MX_I2S2_Init();
+  MX_USART2_UART_Init();
+  /* USER CODE BEGIN 2 */
+  for (int i = 0; i < 6; i++) {
+    HAL_GPIO_TogglePin(GPIOD, GPIO_PIN_12);
+    HAL_Delay(150);
+  }
+  /* USER CODE END 2 */
+
+  /* Init scheduler */
+  osKernelInitialize();  /* Call init function for freertos objects (in cmsis_os2.c) */
+  MX_FREERTOS_Init();
+
+  /* Start scheduler */
+  osKernelStart();
+
+  /* We should never get here as control is now taken by the scheduler */
+
+  /* Infinite loop */
+  /* USER CODE BEGIN WHILE */
+  while (1)
+  {
+    /* USER CODE END WHILE */
+
+    /* USER CODE BEGIN 3 */
+  }
+  /* USER CODE END 3 */
+}
+
+/**
+  * @brief System Clock Configuration
+  * @retval None
+  */
+void SystemClock_Config(void)
+{
+  RCC_OscInitTypeDef RCC_OscInitStruct = {0};
+  RCC_ClkInitTypeDef RCC_ClkInitStruct = {0};
+
+  /** Configure the main internal regulator output voltage
+  */
+  __HAL_RCC_PWR_CLK_ENABLE();
+  __HAL_PWR_VOLTAGESCALING_CONFIG(PWR_REGULATOR_VOLTAGE_SCALE1);
+
+  /** Initializes the RCC Oscillators according to the specified parameters
+  * in the RCC_OscInitTypeDef structure.
+  */
+  RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_HSE;
+  RCC_OscInitStruct.HSEState = RCC_HSE_ON;
+  RCC_OscInitStruct.PLL.PLLState = RCC_PLL_ON;
+  RCC_OscInitStruct.PLL.PLLSource = RCC_PLLSOURCE_HSE;
+  RCC_OscInitStruct.PLL.PLLM = 8;
+  RCC_OscInitStruct.PLL.PLLN = 336;
+  RCC_OscInitStruct.PLL.PLLP = RCC_PLLP_DIV2;
+  RCC_OscInitStruct.PLL.PLLQ = 7;
+  if (HAL_RCC_OscConfig(&RCC_OscInitStruct) != HAL_OK)
+  {
+    Error_Handler();
+  }
+
+  /** Initializes the CPU, AHB and APB buses clocks
+  */
+  RCC_ClkInitStruct.ClockType = RCC_CLOCKTYPE_HCLK|RCC_CLOCKTYPE_SYSCLK
+                              |RCC_CLOCKTYPE_PCLK1|RCC_CLOCKTYPE_PCLK2;
+  RCC_ClkInitStruct.SYSCLKSource = RCC_SYSCLKSOURCE_PLLCLK;
+  RCC_ClkInitStruct.AHBCLKDivider = RCC_SYSCLK_DIV1;
+  RCC_ClkInitStruct.APB1CLKDivider = RCC_HCLK_DIV4;
+  RCC_ClkInitStruct.APB2CLKDivider = RCC_HCLK_DIV2;
+
+  if (HAL_RCC_ClockConfig(&RCC_ClkInitStruct, FLASH_LATENCY_5) != HAL_OK)
+  {
+    Error_Handler();
+  }
+}
+
+/* USER CODE BEGIN 4 */
+
+static float biquad(float in,
+                    volatile float *b0, volatile float *b1, volatile float *b2,
+                    volatile float *a1, volatile float *a2,
+                    volatile float *x1, volatile float *x2,
+                    volatile float *y1, volatile float *y2)
+{
+    float out = *b0 * in + *b1 * (*x1) + *b2 * (*x2)
+                         - *a1 * (*y1) - *a2 * (*y2);
+    *x2 = *x1;
+    *x1 = in;
+    *y2 = *y1;
+    *y1 = out;
+    return out;
+}
+
+static void process_frame(int16_t in_L, int16_t in_R,
+                          int16_t *out_L, int16_t *out_R)
+{
+    float mono = ((float)in_L + (float)in_R) * 0.5f;
+
+    /* Only LP filter, both channels get the same output */
+    float lp = biquad(mono, &act_lp_b0_s1, &act_lp_b1_s1, &act_lp_b2_s1,
+                            &act_lp_a1_s1, &act_lp_a2_s1,
+                            &lp_s1_x1, &lp_s1_x2,
+                            &lp_s1_y1, &lp_s1_y2);
+    lp = biquad(lp,         &act_lp_b0_s2, &act_lp_b1_s2, &act_lp_b2_s2,
+                            &act_lp_a1_s2, &act_lp_a2_s2,
+                            &lp_s2_x1, &lp_s2_x2,
+                            &lp_s2_y1, &lp_s2_y2);
+
+    if (lp >  32767.0f) lp =  32767.0f;
+    if (lp < -32768.0f) lp = -32768.0f;
+
+    *out_L = (int16_t)lp;
+    *out_R = (int16_t)lp;
+}
+
+/*
+ * Apply new coefficients and reset filter states.
+ * Called from ISR context.
+ */
+void apply_coefficients(const FilterCoeffs_t *c)
+{
+    /* DEBUG: toggle orange LED to confirm this function is called */
+    HAL_GPIO_TogglePin(GPIOD, GPIO_PIN_13);
+
+    act_lp_b0_s1 = c->lp_b0_s1; act_lp_b1_s1 = c->lp_b1_s1; act_lp_b2_s1 = c->lp_b2_s1;
+    act_lp_a1_s1 = c->lp_a1_s1; act_lp_a2_s1 = c->lp_a2_s1;
+    act_lp_b0_s2 = c->lp_b0_s2; act_lp_b1_s2 = c->lp_b1_s2; act_lp_b2_s2 = c->lp_b2_s2;
+    act_lp_a1_s2 = c->lp_a1_s2; act_lp_a2_s2 = c->lp_a2_s2;
+
+    act_hp_b0_s1 = c->hp_b0_s1; act_hp_b1_s1 = c->hp_b1_s1; act_hp_b2_s1 = c->hp_b2_s1;
+    act_hp_a1_s1 = c->hp_a1_s1; act_hp_a2_s1 = c->hp_a2_s1;
+    act_hp_b0_s2 = c->hp_b0_s2; act_hp_b1_s2 = c->hp_b1_s2; act_hp_b2_s2 = c->hp_b2_s2;
+    act_hp_a1_s2 = c->hp_a1_s2; act_hp_a2_s2 = c->hp_a2_s2;
+
+    lp_s1_x1 = 0; lp_s1_x2 = 0; lp_s1_y1 = 0; lp_s1_y2 = 0;
+    lp_s2_x1 = 0; lp_s2_x2 = 0; lp_s2_y1 = 0; lp_s2_y2 = 0;
+    hp_s1_x1 = 0; hp_s1_x2 = 0; hp_s1_y1 = 0; hp_s1_y2 = 0;
+    hp_s2_x1 = 0; hp_s2_x2 = 0; hp_s2_y1 = 0; hp_s2_y2 = 0;
+}
+
+/*
+ * [FIX 3] Parameter type changed: uint16_t* -> int16_t*
+ * Matches the corrected buffer type. No more manual casts needed.
+ *
+ * Process one half-buffer (2 stereo frames = 8 halfwords).
+ */
+/*
+ * FILTER MODE: apply EQ filter.
+ * Coefficients are updated directly by UartTask/ButtonTask via apply_coefficients().
+ */
+static void process_half(int16_t *rx, int16_t *tx)
+{
+    int16_t outL, outR;
+
+    /* Frame 0 */
+    process_frame(rx[0], rx[1], &outL, &outR);
+    tx[0] = outL;
+    tx[1] = outR;
+    tx[2] = 0;
+    tx[3] = 0;
+
+    /* Frame 1 */
+    process_frame(rx[4], rx[5], &outL, &outR);
+    tx[4] = outL;
+    tx[5] = outR;
+    tx[6] = 0;
+    tx[7] = 0;
+}
+
+void HAL_I2SEx_TxRxHalfCpltCallback(I2S_HandleTypeDef *hi2s)
+{
+    process_half(&rxBuf[0], &txBuf[0]);
+}
+
+void HAL_I2SEx_TxRxCpltCallback(I2S_HandleTypeDef *hi2s)
+{
+    process_half(&rxBuf[8], &txBuf[8]);
+}
+
+/* USER CODE END 4 */
+
+/**
+  * @brief  Period elapsed callback in non blocking mode
+  * @note   This function is called  when TIM6 interrupt took place, inside
+  * HAL_TIM_IRQHandler(). It makes a direct call to HAL_IncTick() to increment
+  * a global variable "uwTick" used as application time base.
+  * @param  htim : TIM handle
+  * @retval None
+  */
+void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
+{
+  /* USER CODE BEGIN Callback 0 */
+
+  /* USER CODE END Callback 0 */
+  if (htim->Instance == TIM6)
+  {
+    HAL_IncTick();
+  }
+  /* USER CODE BEGIN Callback 1 */
+
+  /* USER CODE END Callback 1 */
+}
+
+/**
+  * @brief  This function is executed in case of error occurrence.
+  * @retval None
+  */
+void Error_Handler(void)
+{
+  /* USER CODE BEGIN Error_Handler_Debug */
+  __disable_irq();
+  while (1)
+  {
+  }
+  /* USER CODE END Error_Handler_Debug */
+}
+#ifdef USE_FULL_ASSERT
+/**
+  * @brief  Reports the name of the source file and the source line number
+  *         where the assert_param error has occurred.
+  * @param  file: pointer to the source file name
+  * @param  line: assert_param error line source number
+  * @retval None
+  */
+void assert_failed(uint8_t *file, uint32_t line)
+{
+  /* USER CODE BEGIN 6 */
+  (void)file;
+  (void)line;
+  /* USER CODE END 6 */
+}
+#endif /* USE_FULL_ASSERT */
