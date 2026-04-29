@@ -3,7 +3,7 @@
 A real-time digital audio processing system that receives Bluetooth audio (A2DP) and applies an 8-band parametric equalizer with live FFT spectrum visualization.
 
 ## System Architecture
-<img width="5712" height="4284" alt="Connection" src="https://github.com/user-attachments/assets/9e19b399-8470-4f0c-ac0a-862ab8c68adf" />
+<img width="1320" height="928" alt="image" src="https://github.com/user-attachments/assets/f530311c-8d76-41d0-9672-722aef86770a" />
 
 ## Hardware
 
@@ -17,7 +17,8 @@ A real-time digital audio processing system that receives Bluetooth audio (A2DP)
 | Power | 24V / 150W PSU | Powers amplifier |
 
 ## Pin Connections
-<img width="4284" height="5712" alt="Connection" src="https://github.com/user-attachments/assets/e4d4ac63-0d18-4e3b-b83c-1e9997cea7a4" />
+<img width="5712" height="4284" alt="Connection" src="https://github.com/user-attachments/assets/db4f64c4-44fd-4ab7-94e0-918746563647" />
+
 
 ### I2S (Audio Data)
 
